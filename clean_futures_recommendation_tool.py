@@ -231,6 +231,68 @@ st.markdown("""
 # HELPER FUNCTIONS - DISTANCE AND GEOSPATIAL
 # ============================================================================
 
+# ============================================================================
+# HELPER FUNCTIONS - DISTANCE AND GEOSPATIAL
+# ============================================================================
+
+def determine_state_county(lat, lon, db):
+    """Determine state and county from GPS coordinates"""
+    # Texas/New Mexico boundary is roughly at -103° longitude
+    state = "Texas" if lon > -103.0 else "New Mexico"
+    
+    # Find nearest county from the landfill database (use county centroids)
+    county_distances = {}
+    counties_seen = set()
+    
+    for lf in db['landfills']:
+        county = lf['county']
+        if county not in counties_seen:
+            # Use first landfill in each county as representative
+            distance = haversine_distance(lat, lon, lf['latitude'], lf['longitude'])
+            county_distances[county] = distance
+            counties_seen.add(county)
+    
+    nearest_county = min(county_distances, key=county_distances.get) if county_distances else "Unknown"
+    
+    return state, nearest_county
+
+def get_soil_type(lat, lon, state):
+    """Estimate soil type based on location in Permian Basin"""
+    # Simplified soil classification for Permian Basin
+    # In production, this would query USDA Web Soil Survey or similar database
+    
+    # Eastern Permian (more clay-rich)
+    if lon > -102.0:
+        return "Clay Loam / Silty Clay"
+    # Central Permian (mixed)
+    elif lon > -103.5:
+        return "Sandy Clay Loam / Caliche"
+    # Western Permian (more sandy)
+    else:
+        return "Sandy Loam / Desert Soils"
+
+def get_regulatory_thresholds(state):
+    """Get soil regulatory thresholds for TPH and Chlorides"""
+    # Texas TCEQ Protective Concentration Levels (PCLs)
+    # New Mexico NMED Soil Screening Levels (SSLs)
+    
+    if state == "Texas":
+        return {
+            'tph_residential_mgkg': 100,
+            'tph_industrial_mgkg': 500,
+            'chloride_soil_mgkg': 'Not directly regulated in soil; groundwater standard: 300 mg/L',
+            'regulatory_agency': 'TCEQ (Texas Commission on Environmental Quality)',
+            'notes': 'Risk-based, site-specific cleanup levels may vary'
+        }
+    else:  # New Mexico
+        return {
+            'tph_residential_mgkg': 100,
+            'tph_industrial_mgkg': 1000,
+            'chloride_soil_mgkg': 'Not directly regulated in soil; groundwater standard: 250 mg/L',
+            'regulatory_agency': 'NMED (New Mexico Environment Department)',
+            'notes': 'Risk-based corrective action (RBCA) standards apply'
+        }
+
 def haversine_distance(lat1, lon1, lat2, lon2):
     """Calculate distance between two GPS coordinates in miles"""
     R = 3959  # Earth's radius in miles
@@ -683,8 +745,14 @@ def show_welcome_page():
 def show_simple_questionnaire():
     """Display simple mode questionnaire"""
     
-    st.markdown("## 📝 Project Information (Simple Mode)")
-    st.write("Provide basic details about your site and contamination.")
+    st.title("📝 Simple Mode Questionnaire")
+    st.markdown("### Tell us about your contaminated soil site")
+    st.write("Provide basic details and we'll recommend the best remediation solution.")
+    
+    # Back button
+    if st.button("← Back to Welcome", key="back_simple"):
+        st.session_state.mode = None
+        st.rerun()
     
     with st.form("simple_form"):
         st.markdown("### 📍 Site Location")
@@ -766,8 +834,14 @@ def show_simple_questionnaire():
 def show_advanced_questionnaire():
     """Display advanced mode questionnaire"""
     
-    st.markdown("## 📝 Project Information (Advanced Mode)")
-    st.write("Provide detailed specifications for precise analysis.")
+    st.title("🎛️ Advanced Mode Questionnaire")
+    st.markdown("### Detailed Project Specifications")
+    st.write("Provide comprehensive information for precise analysis and recommendations.")
+    
+    # Back button
+    if st.button("← Back to Welcome", key="back_advanced"):
+        st.session_state.mode = None
+        st.rerun()
     
     with st.form("advanced_form"):
         st.markdown("### 📍 Site Location")
@@ -901,7 +975,92 @@ def show_results():
     
     st.markdown("## 🎯 Solution Analysis & Recommendations")
     
-    # Perform calculations
+    # ========================================================================
+    # LOCATION SUMMARY
+    # ========================================================================
+    
+    st.markdown("### 📍 Location Summary")
+    
+    # Get location details
+    state, county = determine_state_county(analysis['site_lat'], analysis['site_lon'], db)
+    soil_type = get_soil_type(analysis['site_lat'], analysis['site_lon'], state)
+    reg_thresholds = get_regulatory_thresholds(state)
+    
+    # Find nearest qualified landfill for distance
+    nearest_lf = find_nearest_qualified_landfill(
+        analysis['site_lat'], 
+        analysis['site_lon'],
+        analysis['tph_level'],
+        analysis['chloride_level'],
+        analysis['needs_backfill'],
+        db
+    )
+    
+    distance_to_landfill = nearest_lf['distance_miles'] if nearest_lf else "N/A"
+    nearest_landfill_name = f"{nearest_lf['landfill']['company']} - {nearest_lf['landfill']['site_name']}" if nearest_lf else "None found"
+    
+    # Display location info in columns
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        st.markdown(f"""
+        <div class="metric-box">
+            <p class="metric-label">Location</p>
+            <p class="metric-value" style="font-size: 1.5rem;">{state}</p>
+            <p style="color: #5a8a6f; margin: 0.5rem 0 0 0;">
+                <strong>County:</strong> {county}<br>
+                <strong>Coordinates:</strong> {analysis['site_lat']:.4f}, {analysis['site_lon']:.4f}
+            </p>
+        </div>
+        """, unsafe_allow_html=True)
+    
+    with col2:
+        st.markdown(f"""
+        <div class="metric-box">
+            <p class="metric-label">Soil Characteristics</p>
+            <p class="metric-value" style="font-size: 1.3rem;">{soil_type}</p>
+            <p style="color: #5a8a6f; margin: 0.5rem 0 0 0;">
+                <strong>Volume:</strong> {analysis['volume_cy']:,.0f} CY
+            </p>
+        </div>
+        """, unsafe_allow_html=True)
+    
+    with col3:
+        st.markdown(f"""
+        <div class="metric-box">
+            <p class="metric-label">Nearest Landfill</p>
+            <p class="metric-value" style="font-size: 1.3rem;">{distance_to_landfill:.1f} mi</p>
+            <p style="color: #5a8a6f; margin: 0.5rem 0 0 0; font-size: 0.85rem;">
+                {nearest_landfill_name}
+            </p>
+        </div>
+        """, unsafe_allow_html=True)
+    
+    # Regulatory information
+    with st.expander("📋 Regulatory Thresholds & Standards", expanded=False):
+        st.markdown(f"""
+        **Regulatory Agency:** {reg_thresholds['regulatory_agency']}
+        
+        **TPH (Total Petroleum Hydrocarbons) - Soil Cleanup Standards:**
+        - Residential Use: {reg_thresholds['tph_residential_mgkg']} mg/kg
+        - Industrial/Commercial Use: {reg_thresholds['tph_industrial_mgkg']} mg/kg
+        
+        **Chlorides:**
+        - {reg_thresholds['chloride_soil_mgkg']}
+        
+        **Your Site:**
+        - TPH Level: {analysis['tph_level']} mg/kg {'✅ Below industrial threshold' if analysis['tph_level'] < reg_thresholds['tph_industrial_mgkg'] else '⚠️ Exceeds industrial threshold'}
+        - Chloride Level: {analysis['chloride_level']} mg/kg
+        
+        *Note: {reg_thresholds['notes']}*
+        """)
+    
+    st.markdown("---")
+    
+    # ========================================================================
+    # PERFORM CALCULATIONS
+    # ========================================================================
+    
     with st.spinner("Analyzing remediation options..."):
         dig_haul = calculate_dig_and_haul(
             analysis['volume_cy'],
@@ -938,11 +1097,13 @@ def show_results():
     # Generate recommendation
     recommended, scores = generate_recommendation(dig_haul, onsite, surface, analysis['priorities'])
     
-    # Summary metrics at top
-    st.markdown("### 📊 Quick Comparison")
+    # ========================================================================
+    # COMPARISON TABLE
+    # ========================================================================
     
-    col1, col2, col3 = st.columns(3)
+    st.markdown("### 📊 Solution Comparison")
     
+    # Build options list
     options_list = []
     if dig_haul:
         options_list.append(('dig_haul', dig_haul))
@@ -951,172 +1112,178 @@ def show_results():
     if surface:
         options_list.append(('surface', surface))
     
-    for idx, (opt_type, opt) in enumerate(options_list):
-        col = [col1, col2, col3][idx]
-        with col:
-            is_recommended = (opt_type == recommended)
-            
-            if is_recommended:
-                st.markdown('<div class="recommended-badge">⭐ RECOMMENDED</div>', unsafe_allow_html=True)
-            
-            st.markdown(f"""
-                <div class="metric-box">
-                    <p class="metric-label">{opt['option_name']}</p>
-                    <p class="metric-value">${opt['cost_per_cy']:.2f}/CY</p>
-                    <p style="color: #5a8a6f; margin: 0.5rem 0 0 0;">
-                        Total: ${opt['total_cost']:,.0f}<br>
-                        Timeline: {opt['project_days']} days<br>
-                        CO₂: {opt['co2_tons']:.1f} tons
-                    </p>
-                </div>
-            """, unsafe_allow_html=True)
-    
-    st.markdown("---")
-    
-    # Detailed comparison
-    st.markdown("### 📋 Detailed Comparison")
-    
-    # Create comparison dataframe
+    # Create comprehensive comparison dataframe
     comparison_data = []
-    for opt_type, opt in options_list:
-        comparison_data.append({
-            'Solution': opt['option_name'],
-            'Total Cost': f"${opt['total_cost']:,.0f}",
-            'Cost per CY': f"${opt['cost_per_cy']:.2f}",
-            'Timeline (days)': opt['project_days'],
-            'CO₂ Emissions (tons)': f"{opt['co2_tons']:.2f}",
-            'Includes Backfill': '✅' if opt.get('includes_backfill', False) else '❌'
-        })
-    
-    df_comparison = pd.DataFrame(comparison_data)
-    st.dataframe(df_comparison, hide_index=True, use_container_width=True)
-    
-    st.markdown("---")
-    
-    # Detailed option cards
-    st.markdown("### 🔍 Detailed Option Analysis")
-    
     for opt_type, opt in options_list:
         is_recommended = (opt_type == recommended)
         
-        with st.expander(f"{'⭐ ' if is_recommended else ''}{opt['option_name']}", expanded=is_recommended):
-            
-            col1, col2 = st.columns([2, 1])
-            
-            with col1:
-                st.markdown("#### Cost Breakdown")
-                
-                if opt_type == 'dig_haul':
-                    breakdown_data = {
-                        'Category': ['Equipment', 'Trucking', 'Disposal', 'Backfill'],
-                        'Cost': [
-                            f"${opt['equipment_cost']:,.0f}",
-                            f"${opt['trucking_cost']:,.0f}",
-                            f"${opt['disposal_cost']:,.0f}",
-                            f"${opt['backfill_cost']:,.0f}"
-                        ]
-                    }
-                elif opt_type == 'onsite':
-                    breakdown_data = {
-                        'Category': ['Processing', 'Mobilization', 'Amendments'],
-                        'Cost': [
-                            f"${opt['processing_cost']:,.0f}",
-                            f"${opt['mobilization_cost']:,.0f}",
-                            f"${opt['amendment_cost']:,.0f}"
-                        ]
-                    }
-                else:  # surface
-                    breakdown_data = {
-                        'Category': ['Trucking', 'Processing'],
-                        'Cost': [
-                            f"${opt['trucking_cost']:,.0f}",
-                            f"${opt['processing_cost']:,.0f}"
-                        ]
-                    }
-                
-                df_breakdown = pd.DataFrame(breakdown_data)
-                st.dataframe(df_breakdown, hide_index=True, use_container_width=True)
-            
-            with col2:
-                st.markdown("#### Key Details")
-                if opt_type == 'dig_haul':
-                    st.write(f"**Landfill:** {opt['landfill_name']}")
-                    st.write(f"**Distance:** {opt['distance_miles']:.1f} miles")
-                    if opt.get('backfill_available_at_landfill'):
-                        st.success("✅ Backfill available at landfill")
-                    else:
-                        st.warning("⚠️ Separate backfill source needed")
-                elif opt_type == 'onsite':
-                    st.write(f"**Soil Permeability:** {opt['permeability_factor'].title()}")
-                    st.success("✅ Soil returned clean")
-                    st.success("✅ Minimal transportation")
-                else:  # surface
-                    st.write(f"**Facility:** {opt['facility_name']}")
-                    st.write(f"**Distance:** {opt['distance_miles']:.1f} miles")
-                    st.success("✅ Soil returned clean")
-            
-            # Pros and cons
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                st.markdown('<div class="pros-list">', unsafe_allow_html=True)
-                st.markdown("**✅ Advantages**")
-                
-                if opt_type == 'dig_haul':
-                    st.markdown("""
-                        - Fast execution
-                        - Immediate removal
-                        - No onsite disruption
-                        - Predictable timeline
-                    """)
-                elif opt_type == 'onsite':
-                    st.markdown("""
-                        - Lowest carbon footprint
-                        - Original soil retained
-                        - No disposal liability
-                        - Cost-effective for large volumes
-                        - Sustainable solution
-                    """)
-                else:  # surface
-                    st.markdown("""
-                        - Clean soil returned
-                        - Controlled environment
-                        - No disposal liability
-                        - Single vendor solution
-                        - Good for complex contamination
-                    """)
-                
-                st.markdown('</div>', unsafe_allow_html=True)
-            
-            with col2:
-                st.markdown('<div class="cons-list">', unsafe_allow_html=True)
-                st.markdown("**⚠️ Considerations**")
-                
-                if opt_type == 'dig_haul':
-                    st.markdown("""
-                        - Highest carbon footprint
-                        - Permanent disposal liability
-                        - Backfill coordination
-                        - Distance-dependent costs
-                    """)
-                elif opt_type == 'onsite':
-                    st.markdown("""
-                        - Longer timeline
-                        - Weather dependent
-                        - Space requirements
-                        - Ongoing site presence
-                    """)
-                else:  # surface
-                    st.markdown("""
-                        - Transportation costs both ways
-                        - Facility scheduling dependent
-                        - Moderate timeline
-                    """)
-                
-                st.markdown('</div>', unsafe_allow_html=True)
+        row = {
+            '': '⭐ RECOMMENDED' if is_recommended else '',
+            'Solution': opt['option_name'],
+            'Total Cost': f"${opt['total_cost']:,.0f}",
+            'Cost per CY': f"${opt['cost_per_cy']:.2f}",
+            'Timeline': f"{opt['project_days']} days",
+            'CO₂ Emissions': f"{opt['co2_tons']:.2f} tons",
+            'Backfill Included': '✅ Yes' if opt.get('includes_backfill', False) else '❌ No',
+        }
+        
+        # Add specific details
+        if opt_type == 'dig_haul':
+            row['Key Details'] = f"{opt['distance_miles']:.0f} mi to landfill"
+            if not opt.get('backfill_available_at_landfill'):
+                row['Key Details'] += " ⚠️ Separate backfill needed"
+        elif opt_type == 'onsite':
+            row['Key Details'] = "Soil treated in place"
+        else:  # surface
+            row['Key Details'] = f"{opt['distance_miles']:.0f} mi to facility"
+        
+        comparison_data.append(row)
     
-    # Recommendation explanation
+    df_comparison = pd.DataFrame(comparison_data)
+    
+    # Display table with custom styling
+    st.dataframe(
+        df_comparison,
+        hide_index=True,
+        use_container_width=True,
+        column_config={
+            '': st.column_config.TextColumn(width="small"),
+            'Solution': st.column_config.TextColumn(width="medium"),
+            'Total Cost': st.column_config.TextColumn(width="medium"),
+            'Cost per CY': st.column_config.TextColumn(width="small"),
+            'Timeline': st.column_config.TextColumn(width="small"),
+            'CO₂ Emissions': st.column_config.TextColumn(width="small"),
+            'Backfill Included': st.column_config.TextColumn(width="small"),
+            'Key Details': st.column_config.TextColumn(width="medium"),
+        }
+    )
+    
     st.markdown("---")
+    
+    # ========================================================================
+    # DETAILED BREAKDOWNS
+    # ========================================================================
+    
+    st.markdown("### 💰 Detailed Cost Breakdowns")
+    
+    col1, col2, col3 = st.columns(3)
+    
+    for idx, (opt_type, opt) in enumerate(options_list):
+        col = [col1, col2, col3][idx]
+        is_recommended = (opt_type == recommended)
+        
+        with col:
+            if is_recommended:
+                st.markdown('<div class="recommended-badge">⭐ RECOMMENDED</div>', unsafe_allow_html=True)
+            
+            st.markdown(f"**{opt['option_name']}**")
+            
+            if opt_type == 'dig_haul':
+                breakdown = {
+                    'Equipment': f"${opt['equipment_cost']:,.0f}",
+                    'Trucking': f"${opt['trucking_cost']:,.0f}",
+                    'Disposal': f"${opt['disposal_cost']:,.0f}",
+                    'Backfill': f"${opt['backfill_cost']:,.0f}",
+                }
+            elif opt_type == 'onsite':
+                breakdown = {
+                    'Processing': f"${opt['processing_cost']:,.0f}",
+                    'Mobilization': f"${opt['mobilization_cost']:,.0f}",
+                    'Amendments': f"${opt['amendment_cost']:,.0f}",
+                }
+            else:  # surface
+                breakdown = {
+                    'Trucking': f"${opt['trucking_cost']:,.0f}",
+                    'Processing': f"${opt['processing_cost']:,.0f}",
+                }
+            
+            for category, cost in breakdown.items():
+                st.write(f"• {category}: {cost}")
+            
+            st.markdown(f"**Total: ${opt['total_cost']:,.0f}**")
+    
+    st.markdown("---")
+    
+    # ========================================================================
+    # PROS & CONS
+    # ========================================================================
+    
+    st.markdown("### ✅ ⚠️ Advantages & Considerations")
+    
+    col1, col2, col3 = st.columns(3)
+    
+    pros_cons = {
+        'dig_haul': {
+            'pros': [
+                'Fast execution',
+                'Immediate removal',
+                'No onsite disruption',
+                'Predictable timeline'
+            ],
+            'cons': [
+                'Highest carbon footprint',
+                'Permanent disposal liability',
+                'Backfill coordination needed',
+                'Distance-dependent costs'
+            ]
+        },
+        'onsite': {
+            'pros': [
+                'Lowest carbon footprint',
+                'Original soil retained',
+                'No disposal liability',
+                'Cost-effective for large volumes',
+                'Sustainable solution'
+            ],
+            'cons': [
+                'Longer timeline',
+                'Weather dependent',
+                'Space requirements',
+                'Ongoing site presence'
+            ]
+        },
+        'surface': {
+            'pros': [
+                'Clean soil returned',
+                'Controlled environment',
+                'No disposal liability',
+                'Single vendor solution',
+                'Good for complex contamination'
+            ],
+            'cons': [
+                'Transportation both ways',
+                'Facility scheduling',
+                'Moderate timeline'
+            ]
+        }
+    }
+    
+    for idx, (opt_type, opt) in enumerate(options_list):
+        col = [col1, col2, col3][idx]
+        
+        with col:
+            st.markdown(f"**{opt['option_name']}**")
+            
+            st.markdown('<div class="pros-list">', unsafe_allow_html=True)
+            st.markdown("**✅ Advantages**")
+            for pro in pros_cons[opt_type]['pros']:
+                st.markdown(f"• {pro}")
+            st.markdown('</div>', unsafe_allow_html=True)
+            
+            st.markdown("")
+            
+            st.markdown('<div class="cons-list">', unsafe_allow_html=True)
+            st.markdown("**⚠️ Considerations**")
+            for con in pros_cons[opt_type]['cons']:
+                st.markdown(f"• {con}")
+            st.markdown('</div>', unsafe_allow_html=True)
+    
+    st.markdown("---")
+    
+    # ========================================================================
+    # RECOMMENDATION EXPLANATION
+    # ========================================================================
+    
     st.markdown("### 💡 Why This Recommendation?")
     
     if recommended == 'dig_haul':
@@ -1125,6 +1292,7 @@ def show_results():
             - Fast execution meets your timeline needs
             - Volume and distance make trucking economical
             - Immediate site remediation is prioritized
+            - Landfill proximity makes this cost-effective
         """)
     elif recommended == 'onsite':
         st.success("""
@@ -1134,45 +1302,56 @@ def show_results():
             - Original soil retained, reducing waste
             - No long-term disposal liability
             - Sustainable approach aligns with ESG goals
+            - Treatment duration is acceptable for your timeline priorities
         """)
     else:  # surface
         st.success("""
             **Surface Facility Treatment** is recommended for your project because:
             - Balanced cost and timeline
-            - Clean soil returned to site
+            - Clean soil returned to site (no backfill sourcing needed)
             - Professional treatment in controlled environment
             - No disposal liability
+            - Facility proximity makes transportation economical
             - Excellent for sites requiring backfill
         """)
     
-    # Download option
-    st.markdown("---")
-    if st.button("🔄 New Analysis", use_container_width=True):
-        st.session_state.clear()
-        st.rerun()
+    # ========================================================================
+    # DOWNLOAD & RESTART
+    # ========================================================================
     
-    # Create downloadable report
-    with st.expander("📥 Download Detailed Report"):
+    st.markdown("---")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        # Create downloadable report
         report_data = []
         for opt_type, opt in options_list:
             report_data.append({
                 'Solution': opt['option_name'],
+                'Recommended': 'Yes' if opt_type == recommended else 'No',
                 'Total_Cost': opt['total_cost'],
                 'Cost_Per_CY': opt['cost_per_cy'],
                 'Project_Days': opt['project_days'],
                 'CO2_Tons': opt['co2_tons'],
-                'Recommended': 'Yes' if opt_type == recommended else 'No'
+                'Includes_Backfill': 'Yes' if opt.get('includes_backfill', False) else 'No'
             })
         
         df_report = pd.DataFrame(report_data)
         csv = df_report.to_csv(index=False)
         
         st.download_button(
-            label="Download CSV Report",
+            label="📥 Download Report (CSV)",
             data=csv,
             file_name=f"clean_futures_analysis_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-            mime="text/csv"
+            mime="text/csv",
+            use_container_width=True
         )
+    
+    with col2:
+        if st.button("🔄 New Analysis", use_container_width=True):
+            st.session_state.clear()
+            st.rerun()
 
 # ============================================================================
 # MAIN APP
